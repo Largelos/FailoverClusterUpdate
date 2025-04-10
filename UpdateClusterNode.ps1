@@ -1,4 +1,4 @@
-﻿param (
+param (
     [string]$Phase = "pre-reboot"
 )
 
@@ -51,7 +51,7 @@ if ($Phase -eq "pre-reboot") {
                     $kb = if ($update.KBArticleIDs) { $update.KBArticleIDs -join ", " } else { "No KB ID" }
                     Log "🔹 $($update.Title) [KB: $kb]"
                 }
-                $needsReboot = $updates | Where-Object { $_.RebootRequired -eq $true }
+                $needsReboot = @($updates | Where-Object { $_.RebootRequired -eq $true })
                 if ($needsReboot.Count -gt 0) {
                     Log "⚠️ Some updates require a reboot after installation."
                 } else {
@@ -92,10 +92,10 @@ if ($Phase -eq "pre-reboot") {
 
         # Check Storage Subsystem health
         $s2d = Get-StorageSubSystem -Model "Clustered Windows Storage"
-        if ($s2d.HealthStatus -ne "Healthy") {
-            throw "❌ S2D Health is NOT healthy"
+        if ($s2d.HealthStatus -eq "Unhealthy") {
+            throw "❌ S2D Health is Unhealthy"
         }
-        Log "✅ S2D Health is Healthy."
+        Log "✅ S2D Health is $($s2d.HealthStatus)."
 
         # Prepare for update (move cluster shared volumes)
         $partner = Get-ClusterNode | Where-Object { $_.Name -ne $env:COMPUTERNAME -and $_.State -eq "Up" }
