@@ -33,6 +33,13 @@ function Log {
 if ($Phase -eq "pre-reboot") {
     try {
         Log "===== Starting update on $env:COMPUTERNAME ====="
+        try {
+            Log "🔁 Attempting to update Microsoft Defender Antivirus signatures..."
+            Update-MpSignature -ErrorAction Stop
+            Log "✅ Microsoft Defender signature update completed."
+        } catch {
+            Log "⚠️ Failed to update Microsoft Defender signature: $($_.Exception.Message)"
+        }
         Log "➡️ Checking for new updates"
 
         $hasUpdates = $false
