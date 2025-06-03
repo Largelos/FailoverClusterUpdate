@@ -119,6 +119,14 @@ if ($Phase -eq "pre-reboot") {
             Log "⏸ Node put in maintenance"
         } catch {
             Log "❌ Failed to put node in maintenance: $($_.Exception.Message)"
+            try {
+                Start-Sleep -Seconds 60
+                Resume-ClusterNode -Name $env:COMPUTERNAME -ErrorAction Stop -Failback Immediate
+                Log "✅ Node resumed from maintenance"
+            } catch {
+                Log "❌ Failed to resume node: $($_.Exception.Message)"
+                return
+            }
             return
         }
 
