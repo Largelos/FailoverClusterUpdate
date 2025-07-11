@@ -63,9 +63,11 @@ if ($Phase -eq "pre-reboot") {
     try {
         Log "===== Starting update on $env:COMPUTERNAME ====="
         # Log OS version and patch level
-        $os = Get-CimInstance Win32_OperatingSystem
-        Log "🖥 OS Version: $($os.Caption) $($os.Version) | Build: $($os.BuildNumber)"
-        $hotfixes = Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 5
+        $osInfo = Get-CimInstance -ClassName Win32_OperatingSystem
+    	$reg = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+    	$buildFull = "$($reg.CurrentBuild).$($reg.UBR)"
+    	Log "🖥 OS Version: $($osInfo.Caption) $($osInfo.Version) | Build: $buildFull"
+        $hotfixes = Get-HotFix | Sort-Object InstalledOn -Descending
         foreach ($hf in $hotfixes) {
             Log "📦 HotFix: $($hf.HotFixID) - InstalledOn: $($hf.InstalledOn)"
         }
