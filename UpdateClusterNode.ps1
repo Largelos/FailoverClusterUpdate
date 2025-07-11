@@ -2,7 +2,7 @@ param (
     [string]$Phase = "pre-reboot"
 )
 
-
+# Version 20250711
 # ===== SETTINGS =====
 $LogPath = "C:\ClusterUpdateLogs"
 $TaskName = "ResumeClusterNode"
