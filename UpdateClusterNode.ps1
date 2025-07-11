@@ -196,9 +196,8 @@ if ($Phase -eq "pre-reboot") {
             Log "❌ Failed to schedule post-reboot task: $($_.Exception.Message)"
         }
         
-        Log "🛠 Installing $($updates.Count) update(s)..."
         # Install updates
-        Log "🛠 Installing updates..."
+        Log "🛠 Installing $($updates.Count) update(s)..."
         try {
             $results = Install-WindowsUpdate -AcceptAll -AutoReboot -Confirm:$false -ErrorAction Stop
             if ($results) {
