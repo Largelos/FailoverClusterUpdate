@@ -30,9 +30,53 @@ function Log {
     }
 }
 
+function Test-PendingReboot {
+    $pending = $false
+
+    # Component-Based Servicing
+    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") {
+        $pending = $true
+    }
+
+    # Windows Update
+    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired") {
+        $pending = $true
+    }
+
+    # Pending Computer Rename
+    if ((Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName").ComputerName -ne `
+        (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName").ComputerName) {
+        $pending = $true
+    }
+
+    # Pending file rename operations
+    $pendingRenames = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" -Name "PendingFileRenameOperations" -ErrorAction SilentlyContinue
+    if ($pendingRenames -ne $null) {
+        $pending = $true
+    }
+
+    return $pending
+}
+
+
 if ($Phase -eq "pre-reboot") {
     try {
         Log "===== Starting update on $env:COMPUTERNAME ====="
+        # Log OS version and patch level
+        $os = Get-CimInstance Win32_OperatingSystem
+        Log "🖥 OS Version: $($os.Caption) $($os.Version) | Build: $($os.BuildNumber)"
+        $hotfixes = Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 5
+        foreach ($hf in $hotfixes) {
+            Log "📦 HotFix: $($hf.HotFixID) - InstalledOn: $($hf.InstalledOn)"
+        }
+
+        # Log cluster group status
+        $groups = Get-ClusterGroup
+        foreach ($g in $groups) {
+            Log "🔷 ClusterGroup: $($g.Name) | Owner: $($g.OwnerNode) | State: $($g.State)"
+        }
+
+        # Install defender signatures
         try {
             Log "🔁 Attempting to update Microsoft Defender Antivirus signatures..."
             Update-MpSignature -ErrorAction Stop
@@ -40,14 +84,15 @@ if ($Phase -eq "pre-reboot") {
         } catch {
             Log "⚠️ Failed to update Microsoft Defender signature: $($_.Exception.Message)"
         }
-        Log "➡️ Checking for new updates"
 
+        # Install windows updates
+        Log "➡️ Checking for new updates"
         $hasUpdates = $false
         $needsReboot = $false
         try {
             if (-not (Get-Command Get-WindowsUpdate -ErrorAction SilentlyContinue)) {
-                Install-PackageProvider -Name NuGet -Force -Confirm:$false
-                Install-Module -Name PSWindowsUpdate -Force -Confirm:$false
+                Install-PackageProvider -Name NuGet -Force -Confirm:$false -ErrorAction Stop
+                Install-Module -Name PSWindowsUpdate -Force -Confirm:$false -ErrorAction Stop
             }
             Import-Module PSWindowsUpdate
             $updates = Get-WindowsUpdate -AcceptAll -IgnoreReboot -ErrorAction SilentlyContinue
@@ -137,42 +182,78 @@ if ($Phase -eq "pre-reboot") {
             return
         }
 
-        # Schedule resume on reboot with self-cleanup
-        if ($needsReboot.Count -gt 0) {
-            $ScriptFullPath = $MyInvocation.MyCommand.Definition
-            $TaskAction = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-ExecutionPolicy Bypass -File `"$ScriptFullPath`" -Phase post-reboot"
-            $TaskTrigger = New-ScheduledTaskTrigger -AtStartup
-            $Principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType S4U -RunLevel Highest
-
+        # Schedule post-reboot task
+        $ScriptFullPath = $MyInvocation.MyCommand.Definition
+        $TaskAction = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-ExecutionPolicy Bypass -File `"$ScriptFullPath`" -Phase post-reboot"
+        $TaskTrigger = New-ScheduledTaskTrigger -AtStartup
+        $Principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType S4U -RunLevel Highest
+        try {
             Register-ScheduledTask -TaskName $TaskName -Action $TaskAction -Trigger $TaskTrigger -Principal $Principal -Force
-
             Log "📅 Scheduled post-reboot task: $TaskName"
+        } catch {
+            Log "❌ Failed to schedule post-reboot task: $($_.Exception.Message)"
+        }
+        
+        Log "🛠 Installing $($updates.Count) update(s)..."
+        # Install updates
+        Log "🛠 Installing updates..."
+        try {
+            $results = Install-WindowsUpdate -AcceptAll -AutoReboot -Confirm:$false -ErrorAction Stop
+            if ($results) {
+                foreach ($r in $results) {
+                    Log "✅ Installed: $($r.Title)"
+                }
+            }
+            Log "✅ Update installation completed. System may reboot automatically if required."
+        } catch {
+            Log "❌ Update installation failed: $($_.Exception.Message)"
+            return
         }
 
-        Log "🛠 Installing $($updates.Count) update(s)..."
-        Install-WindowsUpdate -AcceptAll -AutoReboot -Confirm:$false
-        if ($needsReboot.Count -eq 0) {
-            try {
-                Start-Sleep -Seconds 60
-                Resume-ClusterNode -Name $env:COMPUTERNAME -ErrorAction Stop -Failback Immediate
+        # Check if reboot still needed
+        $needsReboot = Test-PendingReboot
+        if ($needsReboot) {
+            Log "⚠️ Reboot is required. Restarting system..."
+            Start-Sleep -Seconds 5
+            Restart-Computer
+        } else {
+            Log "ℹ️ No reboot required."
+            Start-Sleep -Seconds 60
+            $node = Get-ClusterNode -Name $env:COMPUTERNAME
+            if ($node.State -eq "Paused") {
+                Log "🔄 Attempting to resume cluster node: $env:COMPUTERNAME"
+                Resume-ClusterNode -Name $env:COMPUTERNAME -Failback Immediate -ErrorAction Stop
                 Log "✅ Node resumed from maintenance"
+            } else {
+                Log "ℹ️ Node already active, skipping resume"
+            }
+
+            try {
+                Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+                Log "🗑 Scheduled task '$TaskName' removed"
             } catch {
-                Log "❌ Failed to resume node: $($_.Exception.Message)"
-                return
+                Log "⚠️ Failed to remove scheduled task: $($_.Exception.Message)"
             }
         }
     } catch {
-        Log "❌ Update failed: $($_.Exception.Message)"
+        Log "❌ Update process failed: $($_.Exception.Message)"
     }
-} elseif ($Phase -eq "post-reboot") {
-    Log "🔁 Starting post-reboot phase"
+}
 
+elseif ($Phase -eq "post-reboot") {
+    Log "🔁 Starting post-reboot phase"
+    Start-Sleep -Seconds 60
     try {
-        Start-Sleep -Seconds 60
-        Resume-ClusterNode -Name $env:COMPUTERNAME -ErrorAction Stop -Failback Immediate
-        Log "✅ Node resumed from maintenance"
+        $node = Get-ClusterNode -Name $env:COMPUTERNAME
+        if ($node.State -eq "Paused") {
+            Log "🔄 Attempting to resume cluster node: $env:COMPUTERNAME"
+            Resume-ClusterNode -Name $env:COMPUTERNAME -Failback Immediate -ErrorAction Stop
+            Log "✅ Node resumed from maintenance"
+        } else {
+            Log "ℹ️ Node already active, skipping resume"
+        }
     } catch {
-        Log "❌ Failed to resume node: $($_.Exception.Message)"
+        Log "❌ Failed to resume cluster node: $($_.Exception.Message)"
         return
     }
 
@@ -180,6 +261,6 @@ if ($Phase -eq "pre-reboot") {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
         Log "🗑 Scheduled task '$TaskName' removed"
     } catch {
-        Log "⚠️ Failed to remove scheduled task '$TaskName': $($_.Exception.Message)"
+        Log "⚠️ Failed to remove scheduled task: $($_.Exception.Message)"
     }
 }
