@@ -2,7 +2,7 @@ param (
     [string]$Phase = "pre-reboot"  # pre-reboot | post-reboot | schedule-only
 )
 
-# Version 20250930
+# Version 20251103
 # ===== SETTINGS =====
 $LogPath = "C:\ClusterUpdateLogs"
 $TaskName = "ResumeClusterNode"
@@ -343,8 +343,45 @@ if ($Phase -eq "pre-reboot") {
         if ($needsReboot) {
             Log "⚠️ Reboot is required. Restarting system..."
             Log-CurrentState "Before Reboot"
-            Start-Sleep -Seconds 5
-            Restart-Computer
+			# Run quser and capture output
+			$quserOutput = quser 2>&1
+			# Skip header line
+			$lines = $quserOutput | Select-Object -Skip 1
+
+			foreach ($line in $lines) {
+				# Remove leading/trailing spaces
+				$line = $line.Trim()
+				if ($line -eq '') { continue }
+
+				# Split by spaces (multiple spaces)
+				$parts = $line -split '\s+'
+				
+				# Format: USERNAME SESSIONNAME ID STATE ... (quser output)
+				$username = $parts[0]
+				$sessionId = $parts[2]
+
+				# Skip current user and SYSTEM
+				if ($username -eq "SYSTEM") {
+					log "Skipping session for $username"
+					continue
+				}
+
+				# Log the action
+				log "Logging off user $username (Session ID: $sessionId)..."
+
+				# Execute logoff
+				try {
+					logoff $sessionId /V
+				} catch {
+					log "WARNING: Could not log off $username (Session ID: $sessionId). $_"
+				}
+			}
+
+			# Pause briefly to ensure sessions terminate
+			Start-Sleep -Seconds 60
+
+			# Restart the computer
+			Restart-Computer -ErrorAction Stop -verbose
         } else {
             Log "ℹ️ No reboot required. Resuming node immediately..."
             Start-Sleep -Seconds 60
