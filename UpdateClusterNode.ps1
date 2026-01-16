@@ -2,7 +2,7 @@ param (
     [string]$Phase = "pre-reboot"  # pre-reboot | post-reboot | schedule-only
 )
 
-# Version 20251103
+# Version 20260116
 # ===== SETTINGS =====
 $LogPath = "C:\ClusterUpdateLogs"
 $TaskName = "ResumeClusterNode"
@@ -343,39 +343,39 @@ if ($Phase -eq "pre-reboot") {
         if ($needsReboot) {
             Log "⚠️ Reboot is required. Restarting system..."
             Log-CurrentState "Before Reboot"
-			# Run quser and capture output
-			$quserOutput = quser 2>&1
-			# Skip header line
-			$lines = $quserOutput | Select-Object -Skip 1
-
-			foreach ($line in $lines) {
-				# Remove leading/trailing spaces
-				$line = $line.Trim()
-				if ($line -eq '') { continue }
-
-				# Split by spaces (multiple spaces)
-				$parts = $line -split '\s+'
-				
-				# Format: USERNAME SESSIONNAME ID STATE ... (quser output)
-				$username = $parts[0]
-				$sessionId = $parts[2]
-
-				# Skip current user and SYSTEM
-				if ($username -eq "SYSTEM") {
-					log "Skipping session for $username"
-					continue
+			# Get interactive user sessions via CIM
+			$sessions = Get-CimInstance Win32_LogonSession |
+				Where-Object {
+					$_.LogonType -in 2,10  # 2 = Console, 10 = RDP
 				}
-
-				# Log the action
-				log "Logging off user $username (Session ID: $sessionId)..."
-
-				# Execute logoff
-				try {
-					logoff $sessionId /V
-				} catch {
-					log "WARNING: Could not log off $username (Session ID: $sessionId). $_"
+			
+			foreach ($session in $sessions) {
+			
+				$links = Get-CimAssociatedInstance `
+					-InputObject $session `
+					-Association Win32_LoggedOnUser
+			
+				foreach ($link in $links) {
+			
+					$username = "$($link.Antecedent.Domain)\$($link.Antecedent.Name)"
+					$sessionId = $session.LogonId
+			
+					# Skip SYSTEM
+					if ($link.Antecedent.Name -eq "SYSTEM") {
+						Log "Skipping SYSTEM session"
+						continue
+					}
+			
+					Log "Logging off user $username (Session ID: $sessionId)..."
+			
+					try {
+						logoff $sessionId /V
+					} catch {
+						Log "WARNING: Could not log off $username (Session ID: $sessionId). $($_.Exception.Message)"
+					}
 				}
 			}
+
 
 			# Pause briefly to ensure sessions terminate
 			Start-Sleep -Seconds 60
@@ -457,3 +457,4 @@ elseif ($Phase -eq "schedule-only") {
     Register-PostRebootTask
     Log-CurrentState "After schedule-only task creation"
 }
+
